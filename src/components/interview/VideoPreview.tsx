@@ -62,17 +62,21 @@ export const VideoPreview = forwardRef<VideoPreviewRef, VideoPreviewProps>(
         {/* Hidden canvas for capturing frames */}
         <canvas ref={canvasRef} className="hidden" />
         
-        <video
-          ref={videoRef}
-          autoPlay
-          muted
-          playsInline
-          className="absolute inset-0 w-full h-full object-cover"
+        <div 
+          className="absolute inset-0 w-full h-full"
           style={{ 
             transform: "scaleX(-1)",
             WebkitTransform: "scaleX(-1)",
           }}
-        />
+        >
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            className="w-full h-full object-cover"
+          />
+        </div>
         
         {/* Video Controls Overlay */}
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3 z-10">
