@@ -26,6 +26,7 @@ export type Database = {
           responses: Json | null
           score: number | null
           status: string
+          user_id: string | null
           video_url: string | null
         }
         Insert: {
@@ -39,6 +40,7 @@ export type Database = {
           responses?: Json | null
           score?: number | null
           status?: string
+          user_id?: string | null
           video_url?: string | null
         }
         Update: {
@@ -52,6 +54,7 @@ export type Database = {
           responses?: Json | null
           score?: number | null
           status?: string
+          user_id?: string | null
           video_url?: string | null
         }
         Relationships: []

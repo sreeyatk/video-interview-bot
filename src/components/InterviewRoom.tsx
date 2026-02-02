@@ -252,13 +252,22 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
       console.log("Total chunks to upload:", chunksRef.current.length);
       if (chunksRef.current.length > 0) {
         try {
+          // Get authenticated user for storage path
+          const { data: { user } } = await supabase.auth.getUser();
+          if (!user) {
+            toast.error("Authentication required to upload recordings");
+            onComplete({ questions, responses, videoUrl: null });
+            return;
+          }
+
           const mimeType = mediaRecorderRef.current?.mimeType || "video/webm";
           const extension = mimeType.includes("mp4") ? "mp4" : "webm";
           const blob = new Blob(chunksRef.current, { type: mimeType });
           
           console.log("Blob size:", blob.size, "type:", blob.type);
           
-          const fileName = `interview-${candidateName.replace(/\s+/g, "-")}-${Date.now()}.${extension}`;
+          // Include user ID in path for RLS compliance
+          const fileName = `${user.id}/interview-${candidateName.replace(/\s+/g, "-")}-${Date.now()}.${extension}`;
 
           toast.loading("Saving video recording...", { id: "upload" });
 
@@ -276,11 +285,17 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
 
           console.log("Upload successful:", data);
 
-          const { data: urlData } = supabase.storage
+          // Use signed URL for private bucket
+          const { data: signedUrlData, error: signedUrlError } = await supabase.storage
             .from("interview-recordings")
-            .getPublicUrl(fileName);
+            .createSignedUrl(fileName, 3600); // 1 hour expiry
 
-          videoUrl = urlData.publicUrl;
+          if (signedUrlError) {
+            console.error("Signed URL error:", signedUrlError);
+            throw signedUrlError;
+          }
+
+          videoUrl = signedUrlData.signedUrl;
           console.log("Video URL:", videoUrl);
           toast.success("Video saved successfully!", { id: "upload" });
         } catch (error) {
