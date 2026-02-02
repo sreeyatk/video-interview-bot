@@ -1,4 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.3';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -11,7 +12,60 @@ serve(async (req) => {
   }
 
   try {
+    // Extract JWT from Authorization header
+    const authHeader = req.headers.get('Authorization');
+    if (!authHeader?.startsWith('Bearer ')) {
+      console.error("Missing or invalid authorization header");
+      return new Response(
+        JSON.stringify({ error: 'Missing authorization header' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // Verify the JWT using getUser
+    const supabaseClient = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
+      { global: { headers: { Authorization: authHeader } } }
+    );
+
+    const { data: { user }, error: authError } = await supabaseClient.auth.getUser();
+    
+    if (authError || !user) {
+      console.error("JWT verification failed:", authError);
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    const userId = user.id;
+    console.log(`Authenticated user: ${userId}`);
+
     const { action, category, responses, candidateName } = await req.json();
+    
+    // Input validation
+    if (!action || typeof action !== 'string') {
+      return new Response(
+        JSON.stringify({ error: 'Invalid action parameter' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (!['generate_questions', 'analyze_responses'].includes(action)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid action type' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (!category || typeof category !== 'string' || category.length > 100) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid category parameter' }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
     const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
     
     if (!LOVABLE_API_KEY) {
@@ -21,8 +75,11 @@ serve(async (req) => {
     let systemPrompt = "";
     let userPrompt = "";
 
+    // Sanitize category for use in prompts
+    const sanitizedCategory = category.replace(/[<>{}]/g, '').substring(0, 50);
+
     if (action === "generate_questions") {
-      systemPrompt = `You are an expert technical interviewer. Generate exactly 5 technical interview questions for a ${category} developer position. 
+      systemPrompt = `You are an expert technical interviewer. Generate exactly 5 technical interview questions for a ${sanitizedCategory} developer position. 
       
 The questions should:
 - Progress from easy to hard
@@ -33,8 +90,19 @@ The questions should:
 Return ONLY a JSON array of 5 question strings. No other text.
 Example format: ["Question 1?", "Question 2?", "Question 3?", "Question 4?", "Question 5?"]`;
       
-      userPrompt = `Generate 5 ${category} interview questions.`;
+      userPrompt = `Generate 5 ${sanitizedCategory} interview questions.`;
     } else if (action === "analyze_responses") {
+      // Validate responses array
+      if (!Array.isArray(responses) || responses.length === 0) {
+        return new Response(
+          JSON.stringify({ error: 'Invalid responses parameter' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        );
+      }
+
+      // Sanitize candidate name
+      const sanitizedName = (candidateName || 'Candidate').replace(/[<>{}]/g, '').substring(0, 100);
+
       systemPrompt = `You are an expert technical interviewer analyzing interview responses. Evaluate the candidate's performance and provide constructive feedback.
 
 Be encouraging but honest. Consider:
@@ -59,18 +127,23 @@ Return as JSON with this exact format:
   "recommendation": "hire/consider/not_recommended"
 }`;
 
-      userPrompt = `Candidate: ${candidateName}
-Position: ${category} Developer
+      // Sanitize responses
+      const sanitizedResponses = responses.slice(0, 10).map((r: { question: string; answer: string }, i: number) => {
+        const question = (r.question || '').replace(/[<>{}]/g, '').substring(0, 500);
+        const answer = (r.answer || '(No response provided)').replace(/[<>{}]/g, '').substring(0, 2000);
+        return `Q${i + 1}: ${question}\nA${i + 1}: ${answer}`;
+      });
+
+      userPrompt = `Candidate: ${sanitizedName}
+Position: ${sanitizedCategory} Developer
 
 Interview Q&A:
-${responses.map((r: { question: string; answer: string }, i: number) => 
-  `Q${i + 1}: ${r.question}\nA${i + 1}: ${r.answer || "(No response provided)"}`
-).join("\n\n")}
+${sanitizedResponses.join("\n\n")}
 
 Analyze this interview and provide feedback.`;
     }
 
-    console.log(`Processing ${action} for category: ${category}`);
+    console.log(`Processing ${action} for category: ${sanitizedCategory}, user: ${userId}`);
 
     const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
       method: "POST",
@@ -108,7 +181,7 @@ Analyze this interview and provide feedback.`;
     const data = await response.json();
     const content = data.choices?.[0]?.message?.content;
 
-    console.log("AI Response:", content);
+    console.log("AI Response received successfully");
 
     // Parse JSON from the response
     let result;
@@ -129,11 +202,11 @@ Analyze this interview and provide feedback.`;
       console.error("Failed to parse AI response:", parseError);
       if (action === "generate_questions") {
         result = [
-          `What are the core concepts of ${category}?`,
-          `Explain a challenging ${category} problem you've solved.`,
-          `How do you handle debugging in ${category}?`,
-          `What best practices do you follow in ${category}?`,
-          `Describe a ${category} project you're proud of.`
+          `What are the core concepts of ${sanitizedCategory}?`,
+          `Explain a challenging ${sanitizedCategory} problem you've solved.`,
+          `How do you handle debugging in ${sanitizedCategory}?`,
+          `What best practices do you follow in ${sanitizedCategory}?`,
+          `Describe a ${sanitizedCategory} project you're proud of.`
         ];
       } else {
         result = {
