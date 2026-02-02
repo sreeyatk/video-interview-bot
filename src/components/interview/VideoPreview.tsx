@@ -70,6 +70,7 @@ export const VideoPreview = forwardRef<VideoPreviewRef, VideoPreviewProps>(
           className="absolute inset-0 w-full h-full object-cover"
           style={{ 
             transform: "scaleX(-1)",
+            WebkitTransform: "scaleX(-1)",
           }}
         />
         
