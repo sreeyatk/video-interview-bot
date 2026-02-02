@@ -369,19 +369,23 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
         <motion.div
           initial={{ opacity: 0, x: -20 }}
           animate={{ opacity: 1, x: 0 }}
-          className="relative rounded-2xl overflow-hidden glass"
+          className="relative rounded-2xl overflow-hidden glass min-h-[300px] md:min-h-[400px] bg-muted"
         >
           <video
             ref={videoRef}
             autoPlay
             muted
             playsInline
-            className="w-full h-full object-cover"
-            style={{ transform: "scaleX(-1)" }}
+            className="w-full h-full object-cover absolute inset-0"
+            style={{ 
+              transform: "scaleX(-1)",
+              WebkitTransform: "scaleX(-1)",
+              MozTransform: "scaleX(-1)",
+            }}
           />
           
           {/* Video Controls Overlay */}
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3">
+          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3 z-10">
             <Button
               size="icon"
               variant={videoEnabled ? "default" : "destructive"}
@@ -411,7 +415,7 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
           </div>
 
           {/* Name Badge */}
-          <div className="absolute top-4 left-4 px-3 py-1.5 rounded-lg glass-strong">
+          <div className="absolute top-4 left-4 px-3 py-1.5 rounded-lg glass-strong z-10">
             <p className="text-sm font-medium">{candidateName}</p>
           </div>
         </motion.div>
