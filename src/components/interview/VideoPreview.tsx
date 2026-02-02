@@ -45,11 +45,8 @@ export const VideoPreview = forwardRef<VideoPreviewRef, VideoPreviewProps>(
         const ctx = canvas.getContext('2d');
         if (!ctx) return null;
         
-        // Draw the current video frame (mirrored)
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
+        // Draw the current video frame (NOT mirrored - industry standard)
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        ctx.setTransform(1, 0, 0, 1, 0, 0); // Reset transform
         
         // Return as data URL
         return canvas.toDataURL('image/jpeg', 0.8);
