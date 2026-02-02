@@ -60,40 +60,69 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
     }
   };
 
-  // Start camera and microphone
+  // Start camera and microphone - MUST be called directly from user gesture
   const startMedia = async () => {
     try {
+      // CRITICAL: getUserMedia called directly in click handler
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true,
+        video: {
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          facingMode: "user",
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          sampleRate: 44100,
+        },
       });
+      
       streamRef.current = stream;
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        // Ensure video plays
+        await videoRef.current.play().catch(console.error);
       }
 
       setVideoEnabled(true);
       setMicEnabled(true);
 
+      // Determine supported mimeType
+      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+        ? "video/webm;codecs=vp9"
+        : MediaRecorder.isTypeSupported("video/webm")
+        ? "video/webm"
+        : "video/mp4";
+
+      console.log("Using mimeType:", mimeType);
+
       // Start recording
-      const mediaRecorder = new MediaRecorder(stream, {
-        mimeType: "video/webm",
-      });
+      const mediaRecorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
 
       mediaRecorder.ondataavailable = (e) => {
+        console.log("Data available:", e.data.size);
         if (e.data.size > 0) {
           chunksRef.current.push(e.data);
         }
       };
 
+      mediaRecorder.onerror = (e) => {
+        console.error("MediaRecorder error:", e);
+      };
+
       mediaRecorder.start(1000);
       setIsRecording(true);
+      console.log("Recording started");
     } catch (error) {
       console.error("Error accessing media devices:", error);
-      toast.error("Please allow camera and microphone access to continue.");
+      if ((error as Error).name === "NotAllowedError") {
+        toast.error("Camera and microphone access denied. Please check browser permissions.");
+      } else {
+        toast.error("Please allow camera and microphone access to continue.");
+      }
     }
   };
 
@@ -198,40 +227,70 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
 
   // Finish interview and upload video
   const finishInterview = async () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      mediaRecorderRef.current.stop();
-    }
-
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-    }
-
-    let videoUrl: string | null = null;
-
-    // Upload video if we have chunks
-    if (chunksRef.current.length > 0) {
-      try {
-        const blob = new Blob(chunksRef.current, { type: "video/webm" });
-        const fileName = `interview-${candidateName.replace(/\s+/g, "-")}-${Date.now()}.webm`;
-
-        const { data, error } = await supabase.storage
-          .from("interview-recordings")
-          .upload(fileName, blob);
-
-        if (error) throw error;
-
-        const { data: urlData } = supabase.storage
-          .from("interview-recordings")
-          .getPublicUrl(fileName);
-
-        videoUrl = urlData.publicUrl;
-      } catch (error) {
-        console.error("Error uploading video:", error);
-        toast.error("Failed to save video recording.");
+    return new Promise<void>((resolve) => {
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+        // Wait for the recorder to stop and get final data
+        mediaRecorderRef.current.onstop = async () => {
+          console.log("MediaRecorder stopped, chunks:", chunksRef.current.length);
+          await uploadAndComplete();
+          resolve();
+        };
+        mediaRecorderRef.current.stop();
+      } else {
+        uploadAndComplete().then(resolve);
       }
-    }
+    });
 
-    onComplete({ questions, responses, videoUrl });
+    async function uploadAndComplete() {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+
+      let videoUrl: string | null = null;
+
+      // Upload video if we have chunks
+      console.log("Total chunks to upload:", chunksRef.current.length);
+      if (chunksRef.current.length > 0) {
+        try {
+          const mimeType = mediaRecorderRef.current?.mimeType || "video/webm";
+          const extension = mimeType.includes("mp4") ? "mp4" : "webm";
+          const blob = new Blob(chunksRef.current, { type: mimeType });
+          
+          console.log("Blob size:", blob.size, "type:", blob.type);
+          
+          const fileName = `interview-${candidateName.replace(/\s+/g, "-")}-${Date.now()}.${extension}`;
+
+          toast.loading("Saving video recording...", { id: "upload" });
+
+          const { data, error } = await supabase.storage
+            .from("interview-recordings")
+            .upload(fileName, blob, {
+              contentType: mimeType,
+              upsert: false,
+            });
+
+          if (error) {
+            console.error("Upload error:", error);
+            throw error;
+          }
+
+          console.log("Upload successful:", data);
+
+          const { data: urlData } = supabase.storage
+            .from("interview-recordings")
+            .getPublicUrl(fileName);
+
+          videoUrl = urlData.publicUrl;
+          console.log("Video URL:", videoUrl);
+          toast.success("Video saved successfully!", { id: "upload" });
+        } catch (error) {
+          console.error("Error uploading video:", error);
+          toast.error("Failed to save video recording.", { id: "upload" });
+        }
+      }
+
+      onComplete({ questions, responses, videoUrl });
+    }
   };
 
   const progress = ((currentQuestionIndex + 1) / questions.length) * 100;
