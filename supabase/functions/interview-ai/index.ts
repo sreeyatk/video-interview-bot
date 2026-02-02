@@ -22,14 +22,16 @@ serve(async (req) => {
       );
     }
 
-    // Verify the JWT using getUser
-    const supabaseClient = createClient(
+    const token = authHeader.replace('Bearer ', '');
+    
+    // Create admin client to verify the token
+    const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-      { global: { headers: { Authorization: authHeader } } }
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     );
 
-    const { data: { user }, error: authError } = await supabaseClient.auth.getUser();
+    // Verify the JWT by getting the user
+    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
     
     if (authError || !user) {
       console.error("JWT verification failed:", authError);
