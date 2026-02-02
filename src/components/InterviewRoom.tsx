@@ -1,10 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import { Mic, MicOff, Video, VideoOff, Loader2, Volume2, ChevronRight } from "lucide-react";
+import { motion } from "framer-motion";
+import { Video, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+import { VideoPreview, VideoPreviewRef } from "@/components/interview/VideoPreview";
+import { QuestionPanel } from "@/components/interview/QuestionPanel";
 
 interface InterviewRoomProps {
   candidateName: string;
@@ -21,23 +23,26 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
   const [questions, setQuestions] = useState<string[]>([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [responses, setResponses] = useState<{ question: string; answer: string }[]>([]);
-  const [isRecording, setIsRecording] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [currentAnswer, setCurrentAnswer] = useState("");
   const [videoEnabled, setVideoEnabled] = useState(false);
   const [micEnabled, setMicEnabled] = useState(false);
   const [hasSpoken, setHasSpoken] = useState(false);
+  const [capturedPhotos, setCapturedPhotos] = useState<string[]>([]);
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const videoPreviewRef = useRef<VideoPreviewRef>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
   const recognitionRef = useRef<InstanceType<typeof window.SpeechRecognition> | null>(null);
+  const autoCaptureTimersRef = useRef<NodeJS.Timeout[]>([]);
 
   // Load questions on mount
   useEffect(() => {
     loadQuestions();
+    return () => {
+      // Cleanup timers on unmount
+      autoCaptureTimersRef.current.forEach(timer => clearTimeout(timer));
+    };
   }, [category]);
 
   const loadQuestions = async () => {
@@ -63,7 +68,6 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
   // Start camera and microphone - MUST be called directly from user gesture
   const startMedia = async () => {
     try {
-      // CRITICAL: getUserMedia called directly in click handler
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 1280 },
@@ -79,43 +83,16 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
       
       streamRef.current = stream;
 
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        // Ensure video plays
-        await videoRef.current.play().catch(console.error);
+      if (videoPreviewRef.current) {
+        videoPreviewRef.current.setStream(stream);
       }
 
       setVideoEnabled(true);
       setMicEnabled(true);
 
-      // Determine supported mimeType
-      const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-        ? "video/webm;codecs=vp9"
-        : MediaRecorder.isTypeSupported("video/webm")
-        ? "video/webm"
-        : "video/mp4";
+      // Schedule automatic photo captures at different points
+      scheduleAutoCaptures();
 
-      console.log("Using mimeType:", mimeType);
-
-      // Start recording
-      const mediaRecorder = new MediaRecorder(stream, { mimeType });
-      mediaRecorderRef.current = mediaRecorder;
-      chunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (e) => {
-        console.log("Data available:", e.data.size);
-        if (e.data.size > 0) {
-          chunksRef.current.push(e.data);
-        }
-      };
-
-      mediaRecorder.onerror = (e) => {
-        console.error("MediaRecorder error:", e);
-      };
-
-      mediaRecorder.start(1000);
-      setIsRecording(true);
-      console.log("Recording started");
     } catch (error) {
       console.error("Error accessing media devices:", error);
       if ((error as Error).name === "NotAllowedError") {
@@ -125,6 +102,53 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
       }
     }
   };
+
+  // Schedule automatic photo captures
+  const scheduleAutoCaptures = () => {
+    // Capture at 30s, 90s, and 150s after starting
+    const captureIntervals = [30000, 90000, 150000];
+    
+    captureIntervals.forEach((interval, index) => {
+      const timer = setTimeout(() => {
+        if (capturedPhotos.length < 3) {
+          capturePhoto();
+          console.log(`Auto-captured photo ${index + 1} at ${interval / 1000}s`);
+        }
+      }, interval);
+      autoCaptureTimersRef.current.push(timer);
+    });
+  };
+
+  // Capture a photo from the video stream
+  const capturePhoto = useCallback(() => {
+    if (!videoPreviewRef.current) return;
+    if (capturedPhotos.length >= 3) {
+      toast.info("Maximum 3 photos already captured");
+      return;
+    }
+
+    const photoData = videoPreviewRef.current.captureFrame();
+    if (photoData) {
+      setCapturedPhotos(prev => [...prev, photoData]);
+      toast.success(`Photo ${capturedPhotos.length + 1} captured!`);
+    }
+  }, [capturedPhotos.length]);
+
+  // Toggle video
+  const toggleVideo = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getVideoTracks().forEach((t) => (t.enabled = !videoEnabled));
+      setVideoEnabled(!videoEnabled);
+    }
+  }, [videoEnabled]);
+
+  // Toggle mic
+  const toggleMic = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getAudioTracks().forEach((t) => (t.enabled = !micEnabled));
+      setMicEnabled(!micEnabled);
+    }
+  }, [micEnabled]);
 
   // Speak a question using Web Speech API
   const speakQuestion = useCallback((text: string) => {
@@ -225,90 +249,83 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
     }
   };
 
-  // Finish interview and upload video
+  // Finish interview and upload photos
   const finishInterview = async () => {
-    return new Promise<void>((resolve) => {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-        // Wait for the recorder to stop and get final data
-        mediaRecorderRef.current.onstop = async () => {
-          console.log("MediaRecorder stopped, chunks:", chunksRef.current.length);
-          await uploadAndComplete();
-          resolve();
-        };
-        mediaRecorderRef.current.stop();
-      } else {
-        uploadAndComplete().then(resolve);
-      }
-    });
+    // Stop the media stream
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+    }
 
-    async function uploadAndComplete() {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
+    // Clear auto-capture timers
+    autoCaptureTimersRef.current.forEach(timer => clearTimeout(timer));
 
-      let videoUrl: string | null = null;
+    let photoUrls: string[] = [];
 
-      // Upload video if we have chunks
-      console.log("Total chunks to upload:", chunksRef.current.length);
-      if (chunksRef.current.length > 0) {
-        try {
-          // Get authenticated user for storage path
-          const { data: { user } } = await supabase.auth.getUser();
-          if (!user) {
-            toast.error("Authentication required to upload recordings");
-            onComplete({ questions, responses, videoUrl: null });
-            return;
+    // Upload captured photos
+    if (capturedPhotos.length > 0) {
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (!user) {
+          toast.error("Authentication required to upload photos");
+          onComplete({ questions, responses, videoUrl: null });
+          return;
+        }
+
+        toast.loading("Saving photos...", { id: "upload" });
+
+        for (let i = 0; i < capturedPhotos.length; i++) {
+          const photoData = capturedPhotos[i];
+          
+          // Convert base64 to blob
+          const base64Data = photoData.split(',')[1];
+          const byteCharacters = atob(base64Data);
+          const byteNumbers = new Array(byteCharacters.length);
+          for (let j = 0; j < byteCharacters.length; j++) {
+            byteNumbers[j] = byteCharacters.charCodeAt(j);
           }
+          const byteArray = new Uint8Array(byteNumbers);
+          const blob = new Blob([byteArray], { type: 'image/jpeg' });
 
-          const mimeType = mediaRecorderRef.current?.mimeType || "video/webm";
-          const extension = mimeType.includes("mp4") ? "mp4" : "webm";
-          const blob = new Blob(chunksRef.current, { type: mimeType });
-          
-          console.log("Blob size:", blob.size, "type:", blob.type);
-          
-          // Include user ID in path for RLS compliance
-          const fileName = `${user.id}/interview-${candidateName.replace(/\s+/g, "-")}-${Date.now()}.${extension}`;
-
-          toast.loading("Saving video recording...", { id: "upload" });
+          const fileName = `${user.id}/interview-${candidateName.replace(/\s+/g, "-")}-${Date.now()}-photo${i + 1}.jpg`;
 
           const { data, error } = await supabase.storage
             .from("interview-recordings")
             .upload(fileName, blob, {
-              contentType: mimeType,
+              contentType: 'image/jpeg',
               upsert: false,
             });
 
           if (error) {
-            console.error("Upload error:", error);
-            throw error;
+            console.error(`Upload error for photo ${i + 1}:`, error);
+            continue;
           }
 
-          console.log("Upload successful:", data);
-
-          // Use signed URL for private bucket
-          const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+          // Get signed URL for the uploaded photo
+          const { data: signedUrlData } = await supabase.storage
             .from("interview-recordings")
-            .createSignedUrl(fileName, 3600); // 1 hour expiry
+            .createSignedUrl(fileName, 3600);
 
-          if (signedUrlError) {
-            console.error("Signed URL error:", signedUrlError);
-            throw signedUrlError;
+          if (signedUrlData?.signedUrl) {
+            photoUrls.push(signedUrlData.signedUrl);
           }
-
-          videoUrl = signedUrlData.signedUrl;
-          console.log("Video URL:", videoUrl);
-          toast.success("Video saved successfully!", { id: "upload" });
-        } catch (error) {
-          console.error("Error uploading video:", error);
-          toast.error("Failed to save video recording.", { id: "upload" });
         }
-      }
 
-      onComplete({ questions, responses, videoUrl });
+        toast.success(`${photoUrls.length} photo(s) saved successfully!`, { id: "upload" });
+      } catch (error) {
+        console.error("Error uploading photos:", error);
+        toast.error("Failed to save photos.", { id: "upload" });
+      }
     }
+
+    // Pass the first photo URL as videoUrl for backwards compatibility
+    onComplete({ 
+      questions, 
+      responses, 
+      videoUrl: photoUrls.length > 0 ? photoUrls[0] : null 
+    });
   };
 
-  const progress = ((currentQuestionIndex + 1) / questions.length) * 100;
+  const progress = questions.length > 0 ? ((currentQuestionIndex + 1) / questions.length) * 100 : 0;
 
   if (isLoading) {
     return (
@@ -339,7 +356,7 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
           <h2 className="text-2xl font-display font-bold mb-4">Enable Camera</h2>
           <p className="text-muted-foreground mb-8">
             Please enable your camera and microphone to start the interview. 
-            Your session will be recorded.
+            We'll capture a few photos during the session.
           </p>
           <Button
             onClick={startMedia}
@@ -371,8 +388,8 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
             </h2>
           </div>
           <div className="flex items-center gap-2">
-            <div className={`w-3 h-3 rounded-full ${isRecording ? "bg-red-500 animate-pulse" : "bg-muted"}`} />
-            <span className="text-sm text-muted-foreground">Recording</span>
+            <div className="w-3 h-3 rounded-full bg-primary" />
+            <span className="text-sm text-muted-foreground">In Progress</span>
           </div>
         </div>
         <Progress value={progress} className="h-2" />
@@ -381,158 +398,30 @@ export const InterviewRoom = ({ candidateName, category, onComplete }: Interview
       {/* Main Content */}
       <div className="flex-1 grid md:grid-cols-2 gap-6 max-w-6xl mx-auto w-full">
         {/* Video Preview */}
-        <motion.div
-          initial={{ opacity: 0, x: -20 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="relative rounded-2xl overflow-hidden glass min-h-[300px] md:min-h-[400px] bg-muted"
-        >
-          <video
-            ref={videoRef}
-            autoPlay
-            muted
-            playsInline
-            className="w-full h-full object-cover absolute inset-0"
-            style={{ 
-              transform: "scaleX(-1)",
-              WebkitTransform: "scaleX(-1)",
-              MozTransform: "scaleX(-1)",
-            }}
-          />
-          
-          {/* Video Controls Overlay */}
-          <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-3 z-10">
-            <Button
-              size="icon"
-              variant={videoEnabled ? "default" : "destructive"}
-              className="rounded-full w-12 h-12"
-              onClick={() => {
-                if (streamRef.current) {
-                  streamRef.current.getVideoTracks().forEach((t) => (t.enabled = !videoEnabled));
-                  setVideoEnabled(!videoEnabled);
-                }
-              }}
-            >
-              {videoEnabled ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-            </Button>
-            <Button
-              size="icon"
-              variant={micEnabled ? "default" : "destructive"}
-              className="rounded-full w-12 h-12"
-              onClick={() => {
-                if (streamRef.current) {
-                  streamRef.current.getAudioTracks().forEach((t) => (t.enabled = !micEnabled));
-                  setMicEnabled(!micEnabled);
-                }
-              }}
-            >
-              {micEnabled ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
-            </Button>
-          </div>
-
-          {/* Name Badge */}
-          <div className="absolute top-4 left-4 px-3 py-1.5 rounded-lg glass-strong z-10">
-            <p className="text-sm font-medium">{candidateName}</p>
-          </div>
-        </motion.div>
+        <VideoPreview
+          ref={videoPreviewRef}
+          candidateName={candidateName}
+          videoEnabled={videoEnabled}
+          micEnabled={micEnabled}
+          captureCount={capturedPhotos.length}
+          onToggleVideo={toggleVideo}
+          onToggleMic={toggleMic}
+          onCapturePhoto={capturePhoto}
+        />
 
         {/* Question Panel */}
-        <motion.div
-          initial={{ opacity: 0, x: 20 }}
-          animate={{ opacity: 1, x: 0 }}
-          className="flex flex-col"
-        >
-          {/* Question Card */}
-          <div className="flex-1 glass rounded-2xl p-6 flex flex-col">
-            <AnimatePresence mode="wait">
-              <motion.div
-                key={currentQuestionIndex}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -20 }}
-                className="flex-1"
-              >
-                {/* AI Speaking Indicator */}
-                {isSpeaking && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="flex items-center gap-2 mb-4 text-primary"
-                  >
-                    <Volume2 className="w-5 h-5 animate-pulse" />
-                    <span className="text-sm font-medium">AI is speaking...</span>
-                  </motion.div>
-                )}
-
-                {/* Question Text */}
-                <h3 className="text-xl md:text-2xl font-display font-semibold mb-6 leading-relaxed">
-                  {questions[currentQuestionIndex]}
-                </h3>
-
-                {/* Answer Display */}
-                {currentAnswer && (
-                  <div className="p-4 rounded-xl bg-muted/50 mb-4">
-                    <p className="text-sm text-muted-foreground mb-1">Your Answer:</p>
-                    <p className="text-foreground">{currentAnswer}</p>
-                  </div>
-                )}
-
-                {/* Listening Indicator */}
-                {isListening && (
-                  <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    className="flex items-center gap-2 text-red-400"
-                  >
-                    <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse" />
-                    <span className="text-sm font-medium">Listening... Speak your answer</span>
-                  </motion.div>
-                )}
-              </motion.div>
-            </AnimatePresence>
-
-            {/* Controls */}
-            <div className="flex gap-3 mt-6">
-              {!hasSpoken ? (
-                <Button
-                  onClick={() => speakQuestion(questions[currentQuestionIndex])}
-                  disabled={isSpeaking}
-                  className="flex-1 h-12 bg-gradient-to-r from-primary to-secondary hover:opacity-90"
-                >
-                  <Volume2 className="w-5 h-5 mr-2" />
-                  Listen to Question
-                </Button>
-              ) : !isListening ? (
-                <Button
-                  onClick={startListening}
-                  className="flex-1 h-12 bg-gradient-to-r from-primary to-secondary hover:opacity-90"
-                >
-                  <Mic className="w-5 h-5 mr-2" />
-                  Start Speaking
-                </Button>
-              ) : (
-                <Button
-                  onClick={stopListening}
-                  variant="destructive"
-                  className="flex-1 h-12"
-                >
-                  <MicOff className="w-5 h-5 mr-2" />
-                  Stop Recording
-                </Button>
-              )}
-
-              {hasSpoken && !isListening && (
-                <Button
-                  onClick={handleNext}
-                  variant="outline"
-                  className="h-12 px-6"
-                >
-                  {currentQuestionIndex < questions.length - 1 ? "Next" : "Finish"}
-                  <ChevronRight className="w-5 h-5 ml-1" />
-                </Button>
-              )}
-            </div>
-          </div>
-        </motion.div>
+        <QuestionPanel
+          question={questions[currentQuestionIndex] || "Loading question..."}
+          currentAnswer={currentAnswer}
+          isSpeaking={isSpeaking}
+          isListening={isListening}
+          hasSpoken={hasSpoken}
+          isLastQuestion={currentQuestionIndex >= questions.length - 1}
+          onListenToQuestion={() => speakQuestion(questions[currentQuestionIndex])}
+          onStartListening={startListening}
+          onStopListening={stopListening}
+          onNext={handleNext}
+        />
       </div>
     </div>
   );
